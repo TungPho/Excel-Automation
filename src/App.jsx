@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import * as XLSX from 'xlsx'
 import './App.css'
 
@@ -50,12 +50,57 @@ function App() {
   const [rows, setRows] = useState([])
   const [editIdx, setEditIdx] = useState(null)
   const [error, setError] = useState('')
+  const [importMsg, setImportMsg] = useState('')
   const rowsRef = useRef(rows)
+  const fileInputRef = useRef(null)
 
   const updateRows = (newRows) => {
     rowsRef.current = newRows
     setRows(newRows)
   }
+
+  const handleImportExcel = useCallback((e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result)
+        const wb = XLSX.read(data, { type: 'array' })
+        const wsName = wb.SheetNames[0]
+        const ws = wb.Sheets[wsName]
+        const jsonData = XLSX.utils.sheet_to_json(ws, { defval: '' })
+
+        if (jsonData.length === 0) {
+          setImportMsg('⚠️ File Excel không có dữ liệu.')
+          return
+        }
+
+        const importedRows = jsonData.map((row) => ({
+          tenKhach: String(row['Tên khách'] ?? ''),
+          giaPhong: String(row['Giá phòng'] ?? ''),
+          ngayGioCheckIn: String(row['Ngày giờ check in'] ?? ''),
+          trangThai: String(row['Trạng thái TT'] ?? 'Chưa thanh toán'),
+          phong: String(row['Phòng'] ?? ''),
+          nguoiSale: String(row['Người sale'] ?? ''),
+          daThanhToan: String(row['Đã thanh toán'] ?? ''),
+          note: String(row['Note'] ?? ''),
+        }))
+
+        updateRows(importedRows)
+        setImportMsg(`✅ Đã nhập ${importedRows.length} khách từ file "${file.name}"`)
+        setTimeout(() => setImportMsg(''), 4000)
+      } catch (err) {
+        setImportMsg('❌ Lỗi đọc file Excel. Vui lòng kiểm tra định dạng file.')
+        console.error(err)
+      }
+    }
+    reader.readAsArrayBuffer(file)
+
+    // Reset file input so the same file can be imported again
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }, [])
 
   const validateText = (text) => {
     if (!text.trim()) return 'Vui lòng dán form chốt khách vào ô nhập liệu.'
@@ -155,8 +200,22 @@ function App() {
           rows={10}
           placeholder={`Form chốt khách: Thông báo chốt khách ngày\nCheck in: 20h 14/9\nCheck out: 22h 14/9\nGiá : 149\nĐã thanh toán: 149\nNgười sale: ly\nTên CCCD: hồng ngọc\nMã Phòng Thuê: 302 404 bưởi`}
         />
-        <button className="btn-add" onClick={handleAdd}>+ Thêm khách</button>
+        <div className="btn-row">
+          <button className="btn-add" onClick={handleAdd}>+ Thêm khách</button>
+          <input
+            type="file"
+            accept=".xlsx,.xls"
+            ref={fileInputRef}
+            onChange={handleImportExcel}
+            id="excel-import"
+            className="file-input-hidden"
+          />
+          <label htmlFor="excel-import" className="btn-add btn-import-excel">
+            Import file Excel
+          </label>
+        </div>
         {error && <p className="error-msg">{error}</p>}
+        {importMsg && <p className={`import-msg ${importMsg.startsWith('✅') ? 'success' : importMsg.startsWith('⚠️') ? 'warn' : 'err'}`}>{importMsg}</p>}
       </div>
 
       {rows.length > 0 && (

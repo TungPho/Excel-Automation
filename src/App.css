@@ -30,10 +30,77 @@ h1 {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-.input-section label {
+.input-section > label {
   display: block;
   font-weight: 600;
   margin-bottom: 8px;
+}
+
+.input-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.input-top-row label {
+  font-weight: 600;
+}
+
+.file-input-hidden {
+  display: none;
+}
+
+.btn-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.btn-row .btn-add {
+  flex: 1;
+  text-align: center;
+}
+
+.btn-import-excel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
+.import-msg {
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  font-weight: 500;
+  animation: fadeIn 0.3s ease;
+}
+
+.import-msg.success {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.import-msg.warn {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.import-msg.err {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .input-section textarea {
