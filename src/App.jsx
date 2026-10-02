@@ -1,6 +1,19 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import * as XLSX from 'xlsx'
 import './App.css'
+import {
+  getAllRows,
+  putRow,
+  putRows,
+  deleteRow as dbDeleteRow,
+  clearRows,
+  deleteRowsBefore,
+  estimateStorage,
+} from './db'
+
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
+const WARN_PERCENT = 80 // Nhắc xuất Excel khi dung lượng đạt mức này
+const LEGACY_KEY = 'booking-app-rows' // Khóa localStorage cũ để migrate
 
 function parseBookingText(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
@@ -45,81 +58,108 @@ function parseBookingText(text) {
   }
 }
 
+function newId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+function fmtBytes(b) {
+  if (!b) return '0 KB'
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function fmtDate(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const p = n => String(n).padStart(2, '0')
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 function App() {
   const [text, setText] = useState('')
   const [rows, setRows] = useState([])
   const [editIdx, setEditIdx] = useState(null)
   const [error, setError] = useState('')
-  const [importMsg, setImportMsg] = useState('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+  const [storage, setStorage] = useState({ usage: 0, quota: 0 })
+  const [loading, setLoading] = useState(true)
+  const [dirty, setDirty] = useState(false)
+  const [lastSaved, setLastSaved] = useState(null)
+  const [deleteBeforeDate, setDeleteBeforeDate] = useState('')
   const rowsRef = useRef(rows)
-  const fileInputRef = useRef(null)
 
-  const updateRows = (newRows) => {
+  const setRowsSynced = (newRows) => {
     rowsRef.current = newRows
     setRows(newRows)
   }
 
-  const handleImportExcel = useCallback((e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onload = (evt) => {
-      try {
-        const data = new Uint8Array(evt.target.result)
-        const wb = XLSX.read(data, { type: 'array' })
-        const wsName = wb.SheetNames[0]
-        const ws = wb.Sheets[wsName]
-        const jsonData = XLSX.utils.sheet_to_json(ws, { defval: '' })
-
-        if (jsonData.length === 0) {
-          setImportMsg('⚠️ File Excel không có dữ liệu.')
-          return
-        }
-
-        const importedRows = jsonData.map((row) => ({
-          tenKhach: String(row['Tên khách'] ?? ''),
-          giaPhong: String(row['Giá phòng'] ?? ''),
-          ngayGioCheckIn: String(row['Ngày giờ check in'] ?? ''),
-          trangThai: String(row['Trạng thái TT'] ?? 'Chưa thanh toán'),
-          phong: String(row['Phòng'] ?? ''),
-          nguoiSale: String(row['Người sale'] ?? ''),
-          daThanhToan: String(row['Đã thanh toán'] ?? ''),
-          note: String(row['Note'] ?? ''),
-        }))
-
-        updateRows(importedRows)
-        setImportMsg(`✅ Đã nhập ${importedRows.length} khách từ file "${file.name}"`)
-        setTimeout(() => setImportMsg(''), 4000)
-      } catch (err) {
-        setImportMsg('❌ Lỗi đọc file Excel. Vui lòng kiểm tra định dạng file.')
-        console.error(err)
-      }
-    }
-    reader.readAsArrayBuffer(file)
-
-    // Reset file input so the same file can be imported again
-    if (fileInputRef.current) fileInputRef.current.value = ''
+  const refreshStorage = useCallback(async () => {
+    setStorage(await estimateStorage())
   }, [])
+
+  const onQuota = (e) => {
+    if (e && e.name === 'QuotaExceededError') {
+      setError('Hết dung lượng lưu trữ trình duyệt. Hãy xuất Excel rồi xóa bớt dữ liệu cũ.')
+    }
+  }
+
+  // Tải dữ liệu lần đầu: migrate từ localStorage cũ (nếu có) rồi đọc từ IndexedDB.
+  useEffect(() => {
+    (async () => {
+      try {
+        let data = await getAllRows()
+        if (data.length === 0) {
+          const raw = localStorage.getItem(LEGACY_KEY)
+          if (raw) {
+            try {
+              const legacy = JSON.parse(raw)
+              if (Array.isArray(legacy) && legacy.length) {
+                const now = new Date().toISOString()
+                data = legacy.map(r => ({
+                  ...r,
+                  id: r.id || newId(),
+                  createdAt: r.createdAt || now,
+                }))
+                await putRows(data)
+              }
+            } catch { /* bỏ qua dữ liệu cũ hỏng */ }
+          }
+        }
+        data.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+        setRowsSynced(data)
+      } catch (e) {
+        setError('Không mở được cơ sở dữ liệu trình duyệt: ' + (e?.message || e))
+      } finally {
+        setLoading(false)
+        refreshStorage()
+      }
+    })()
+  }, [refreshStorage])
 
   const validateText = (text) => {
     if (!text.trim()) return 'Vui lòng dán form chốt khách vào ô nhập liệu.'
 
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
-    const has = (key) => lines.some(l => l.toLowerCase().startsWith(key.toLowerCase()))
-
-    const missing = []
-    if (!has('Check in')) missing.push('Check in')
-    if (!has('Check out')) missing.push('Check out')
-    if (!has('Giá')) missing.push('Giá')
-    if (!has('Tên CCCD')) missing.push('Tên CCCD')
-    if (!has('Mã Phòng Thuê') && !has('Mã phòng thuê')) missing.push('Mã Phòng Thuê')
-
-    if (missing.length > 0) return `Thiếu trường bắt buộc: ${missing.join(', ')}`
-
     const get = (key) => {
       const line = lines.find(l => l.toLowerCase().startsWith(key.toLowerCase()))
       return line ? line.substring(line.indexOf(':') + 1).trim() : ''
+    }
+
+    // Chỉ cần ít nhất 1 trường có dữ liệu là thêm được; các trường thiếu để trống.
+    const fields = [
+      get('Check in'),
+      get('Check out'),
+      get('Giá'),
+      get('Đã thanh toán'),
+      get('Người sale'),
+      get('Tên CCCD'),
+      get('Mã Phòng Thuê') || get('Mã phòng thuê'),
+    ]
+    if (!fields.some(v => v)) {
+      return 'Cần ít nhất 1 trường hợp lệ (Check in, Check out, Giá, Tên CCCD, Mã Phòng Thuê...).'
     }
 
     const gia = get('Giá')
@@ -136,19 +176,70 @@ function App() {
     }
     setError('')
     const parsed = parseBookingText(text)
-    updateRows([...rowsRef.current, parsed])
+    const row = { ...parsed, id: newId(), createdAt: new Date().toISOString() }
+    const newRows = [...rowsRef.current, row]
+    setRowsSynced(newRows)
     setText('')
+    setPage(Math.ceil(newRows.length / pageSize))
+    putRow(row).then(refreshStorage).catch(onQuota)
   }
 
   const handleEdit = (idx, field, value) => {
     const updated = [...rowsRef.current]
     updated[idx] = { ...updated[idx], [field]: value }
-    updateRows(updated)
+    setRowsSynced(updated)
+    setDirty(true)
+  }
+
+  const handleRowSaveDone = (row) => {
+    setEditIdx(null)
+    putRow(row)
+      .then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() })
+      .catch(onQuota)
   }
 
   const handleDelete = (idx) => {
-    updateRows(rowsRef.current.filter((_, i) => i !== idx))
+    const row = rowsRef.current[idx]
+    setRowsSynced(rowsRef.current.filter((_, i) => i !== idx))
     if (editIdx === idx) setEditIdx(null)
+    if (row?.id) dbDeleteRow(row.id).then(refreshStorage)
+  }
+
+  const handleClearAll = async () => {
+    if (!window.confirm('Xóa toàn bộ dữ liệu đã lưu? Hành động này không thể hoàn tác.')) return
+    await clearRows()
+    setRowsSynced([])
+    setEditIdx(null)
+    setPage(1)
+    setDirty(false)
+    refreshStorage()
+  }
+
+  const handleDeleteBefore = async () => {
+    if (!deleteBeforeDate) {
+      setError('Vui lòng chọn ngày trước khi xóa.')
+      return
+    }
+    const iso = new Date(deleteBeforeDate + 'T00:00:00').toISOString()
+    if (!window.confirm(`Xóa tất cả record được tạo TRƯỚC ngày ${deleteBeforeDate}?`)) return
+    const removed = await deleteRowsBefore(iso)
+    const remaining = rowsRef.current.filter(r => (r.createdAt || '') >= iso)
+    setRowsSynced(remaining)
+    setPage(1)
+    setError('')
+    refreshStorage()
+    window.alert(`Đã xóa ${removed} record.`)
+  }
+
+  const handleManualSave = async () => {
+    try {
+      await putRows(rowsRef.current)
+      setDirty(false)
+      setLastSaved(new Date())
+      refreshStorage()
+    } catch (e) {
+      onQuota(e)
+    }
   }
 
   const handleExport = () => {
@@ -158,6 +249,7 @@ function App() {
 
     const data = currentRows.map((r, i) => ({
       'STT': i + 1,
+      'Ngày tạo': fmtDate(r.createdAt),
       'Tên khách': r.tenKhach,
       'Giá phòng': r.giaPhong,
       'Ngày giờ check in': r.ngayGioCheckIn,
@@ -171,6 +263,7 @@ function App() {
     const ws = XLSX.utils.json_to_sheet(data)
     ws['!cols'] = [
       { wch: 5 },
+      { wch: 18 },
       { wch: 22 },
       { wch: 15 },
       { wch: 30 },
@@ -188,9 +281,31 @@ function App() {
 
   const trangThaiOptions = ['Chưa thanh toán', 'Đã TT đủ', 'Đã TT 1 phần']
 
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const startIdx = (currentPage - 1) * pageSize
+  const pagedRows = useMemo(
+    () => rows.slice(startIdx, startIdx + pageSize).map((r, i) => ({ r, globalIdx: startIdx + i })),
+    [rows, startIdx, pageSize]
+  )
+
+  const percent = storage.quota ? Math.min(100, (storage.usage / storage.quota) * 100) : 0
+  const overThreshold = percent >= WARN_PERCENT
+  const freeBytes = Math.max(0, storage.quota - storage.usage)
+
+  const goToPage = (p) => setPage(Math.min(totalPages, Math.max(1, p)))
+
   return (
     <div className="container">
       <h1>Quản lý chốt khách</h1>
+
+      {overThreshold && (
+        <div className="banner-warn">
+          ⚠️ Dung lượng lưu trữ đã dùng <b>{percent.toFixed(0)}%</b>. Nên <b>Tải Excel</b> để
+          sao lưu rồi xóa bớt dữ liệu cũ.
+          <button className="btn-export sm" onClick={handleExport}>Tải Excel ngay</button>
+        </div>
+      )}
 
       <div className="input-section">
         <label>Dán form chốt khách vào đây:</label>
@@ -200,31 +315,59 @@ function App() {
           rows={10}
           placeholder={`Form chốt khách: Thông báo chốt khách ngày\nCheck in: 20h 14/9\nCheck out: 22h 14/9\nGiá : 149\nĐã thanh toán: 149\nNgười sale: ly\nTên CCCD: hồng ngọc\nMã Phòng Thuê: 302 404 bưởi`}
         />
-        <div className="btn-row">
-          <button className="btn-add" onClick={handleAdd}>+ Thêm khách</button>
-          <input
-            type="file"
-            accept=".xlsx,.xls"
-            ref={fileInputRef}
-            onChange={handleImportExcel}
-            id="excel-import"
-            className="file-input-hidden"
-          />
-          <label htmlFor="excel-import" className="btn-add btn-import-excel">
-            Import file Excel
-          </label>
-        </div>
+        <button className="btn-add" onClick={handleAdd}>+ Thêm khách</button>
         {error && <p className="error-msg">{error}</p>}
-        {importMsg && <p className={`import-msg ${importMsg.startsWith('✅') ? 'success' : importMsg.startsWith('⚠️') ? 'warn' : 'err'}`}>{importMsg}</p>}
       </div>
 
-      {rows.length > 0 && (
+      {loading ? (
+        <p className="loading-msg">Đang tải dữ liệu từ cơ sở dữ liệu trình duyệt...</p>
+      ) : rows.length > 0 ? (
         <div className="table-section">
           <div className="table-header">
             <h2>Danh sách khách ({rows.length})</h2>
-            <button className="btn-export" onClick={handleExport}>
-              Tổng hợp & Tải Excel
+            <div className="header-actions">
+              <button className="btn-save-all" onClick={handleManualSave}>
+                💾 Lưu{dirty ? ' *' : ''}
+              </button>
+              <button className="btn-export" onClick={handleExport}>
+                Tổng hợp & Tải Excel
+              </button>
+              <button className="btn-clear" onClick={handleClearAll}>
+                Xóa tất cả
+              </button>
+            </div>
+          </div>
+
+          <div className="status-line">
+            {dirty
+              ? <span className="dirty">● Có thay đổi chưa lưu</span>
+              : <span className="saved">● Đã lưu{lastSaved ? ` lúc ${fmtDate(lastSaved.toISOString())}` : ''}</span>}
+          </div>
+
+          <div className="maintenance-bar">
+            <label>Xóa record tạo trước ngày:</label>
+            <input
+              type="date"
+              value={deleteBeforeDate}
+              onChange={e => setDeleteBeforeDate(e.target.value)}
+            />
+            <button className="btn-delete-before" onClick={handleDeleteBefore}>
+              Xóa theo ngày
             </button>
+          </div>
+
+          <div className="storage-bar">
+            <div className="storage-track">
+              <div
+                className={`storage-fill ${overThreshold ? 'warn' : ''}`}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+            <span className="storage-text">
+              Đã dùng {fmtBytes(storage.usage)}
+              {storage.quota ? ` / ${fmtBytes(storage.quota)} (${percent.toFixed(1)}%)` : ''} ·
+              còn trống ~{fmtBytes(freeBytes)} · {rows.length.toLocaleString('vi-VN')} record (IndexedDB)
+            </span>
           </div>
 
           <div className="table-wrapper">
@@ -232,6 +375,7 @@ function App() {
               <thead>
                 <tr>
                   <th>STT</th>
+                  <th>Ngày tạo</th>
                   <th>Tên khách</th>
                   <th>Giá phòng</th>
                   <th>Ngày giờ check in</th>
@@ -244,9 +388,10 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i}>
+                {pagedRows.map(({ r, globalIdx: i }) => (
+                  <tr key={r.id || i}>
                     <td>{i + 1}</td>
+                    <td className="created-cell">{fmtDate(r.createdAt)}</td>
                     {editIdx === i ? (
                       <>
                         <td><input value={r.tenKhach} onChange={e => handleEdit(i, 'tenKhach', e.target.value)} /></td>
@@ -262,7 +407,7 @@ function App() {
                         <td><input value={r.daThanhToan} onChange={e => handleEdit(i, 'daThanhToan', e.target.value)} /></td>
                         <td><input value={r.note} onChange={e => handleEdit(i, 'note', e.target.value)} /></td>
                         <td>
-                          <button className="btn-save" onClick={() => setEditIdx(null)}>Lưu</button>
+                          <button className="btn-save" onClick={() => handleRowSaveDone(r)}>Lưu</button>
                         </td>
                       </>
                     ) : (
@@ -290,7 +435,28 @@ function App() {
               </tbody>
             </table>
           </div>
+
+          <div className="pagination">
+            <div className="page-size">
+              <label>Số dòng/trang:</label>
+              <select
+                value={pageSize}
+                onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}
+              >
+                {PAGE_SIZE_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="page-nav">
+              <button onClick={() => goToPage(1)} disabled={currentPage === 1}>«</button>
+              <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1}>‹</button>
+              <span>Trang {currentPage} / {totalPages}</span>
+              <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage === totalPages}>›</button>
+              <button onClick={() => goToPage(totalPages)} disabled={currentPage === totalPages}>»</button>
+            </div>
+          </div>
         </div>
+      ) : (
+        <p className="loading-msg">Chưa có dữ liệu. Hãy dán form và bấm “+ Thêm khách”.</p>
       )}
     </div>
   )
