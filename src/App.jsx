@@ -31,7 +31,7 @@ function parseBookingText(text) {
   const tenCCCD = get('Tên CCCD')
   const maPhong = get('Mã Phòng Thuê') || get('Mã phòng thuê')
 
-  let trangThai = 'Chưa thanh toán'
+  let trangThai = 'Đã TT đủ'
   if (daThanhToan && gia && daThanhToan === gia) {
     trangThai = 'Đã TT đủ'
   } else if (daThanhToan && parseFloat(daThanhToan) > 0) {
@@ -41,7 +41,7 @@ function parseBookingText(text) {
   const formatGia = (val) => {
     const num = parseFloat(val)
     if (isNaN(num)) return val
-    return (num * 1000).toLocaleString('vi-VN') + ' đ'
+    return (num * 1000).toLocaleString('vi-VN')
   }
 
   const ngayGioCheckIn = checkIn && checkOut ? `${checkIn} - ${checkOut}` : checkIn
@@ -181,7 +181,7 @@ function App() {
     setRowsSynced(newRows)
     setText('')
     setPage(Math.ceil(newRows.length / pageSize))
-    putRow(row).then(refreshStorage).catch(onQuota)
+    putRow(row).then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() }).catch(onQuota)
   }
 
   const handleEdit = (idx, field, value) => {
@@ -398,9 +398,9 @@ function App() {
                         <td><input value={r.giaPhong} onChange={e => handleEdit(i, 'giaPhong', e.target.value)} /></td>
                         <td><input value={r.ngayGioCheckIn} onChange={e => handleEdit(i, 'ngayGioCheckIn', e.target.value)} /></td>
                         <td>
-                          <select value={r.trangThai} onChange={e => handleEdit(i, 'trangThai', e.target.value)}>
-                            {trangThaiOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                          </select>
+                          <span className={`status ${r.trangThai === 'Đã TT đủ' ? 'paid' : r.trangThai === 'Đã TT 1 phần' ? 'partial' : 'unpaid'}`}>
+                            {r.trangThai}
+                          </span>
                         </td>
                         <td><input value={r.phong} onChange={e => handleEdit(i, 'phong', e.target.value)} /></td>
                         <td><input value={r.nguoiSale} onChange={e => handleEdit(i, 'nguoiSale', e.target.value)} /></td>
