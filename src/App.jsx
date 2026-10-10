@@ -44,7 +44,7 @@ function parseBookingText(text) {
     return (num * 1000).toLocaleString('vi-VN')
   }
 
-  const ngayGioCheckIn = checkIn && checkOut ? `${checkIn} - ${checkOut}` : checkIn
+  const ngayGioCheckIn = checkIn
 
   return {
     tenKhach: tenCCCD,
