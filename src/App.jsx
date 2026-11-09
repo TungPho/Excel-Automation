@@ -15,6 +15,13 @@ const PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
 const WARN_PERCENT = 80 // Nhắc xuất Excel khi dung lượng đạt mức này
 const LEGACY_KEY = 'booking-app-rows' // Khóa localStorage cũ để migrate
 
+function parseMoney(val) {
+  if (typeof val === 'number') return isNaN(val) ? 0 : val
+  if (!val) return 0
+  const digits = String(val).replace(/[^\d]/g, '')
+  return digits ? parseInt(digits, 10) : 0
+}
+
 function parseBookingText(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
   const get = (key) => {
@@ -31,11 +38,16 @@ function parseBookingText(text) {
   const tenCCCD = get('Tên CCCD')
   const maPhong = get('Mã Phòng Thuê') || get('Mã phòng thuê')
 
-  let trangThai = 'Đã TT đủ'
-  if (daThanhToan && gia && daThanhToan === gia) {
+  let trangThai = 'Chưa thanh toán'
+  const giaNum = parseFloat(gia) || 0
+  const daTTNum = parseFloat(daThanhToan) || 0
+
+  if (daTTNum > 0 && giaNum > 0 && daTTNum >= giaNum) {
     trangThai = 'Đã TT đủ'
-  } else if (daThanhToan && parseFloat(daThanhToan) > 0) {
+  } else if (daTTNum > 0) {
     trangThai = 'Đã TT 1 phần'
+  } else {
+    trangThai = 'Chưa thanh toán'
   }
 
   const formatGia = (val) => {
@@ -54,7 +66,7 @@ function parseBookingText(text) {
     phong: maPhong,
     nguoiSale,
     daThanhToan: daThanhToan ? formatGia(daThanhToan) : '',
-    note: '',
+    note: checkOut ? `Check out: ${checkOut}` : '',
   }
 }
 
@@ -80,7 +92,7 @@ function fmtDate(iso) {
 function App() {
   const [text, setText] = useState('')
   const [rows, setRows] = useState([])
-  const [editIdx, setEditIdx] = useState(null)
+  const [editId, setEditId] = useState(null)
   const [error, setError] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
@@ -184,24 +196,24 @@ function App() {
     putRow(row).then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() }).catch(onQuota)
   }
 
-  const handleEdit = (idx, field, value) => {
-    const updated = [...rowsRef.current]
-    updated[idx] = { ...updated[idx], [field]: value }
+  const handleEdit = (id, field, value) => {
+    const updated = rowsRef.current.map(r => (r.id === id ? { ...r, [field]: value } : r))
     setRowsSynced(updated)
     setDirty(true)
   }
 
   const handleRowSaveDone = (row) => {
-    setEditIdx(null)
+    setEditId(null)
     putRow(row)
       .then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() })
       .catch(onQuota)
   }
 
-  const handleDelete = (idx) => {
-    const row = rowsRef.current[idx]
-    setRowsSynced(rowsRef.current.filter((_, i) => i !== idx))
-    if (editIdx === idx) setEditIdx(null)
+  const handleDelete = (id) => {
+    const row = rowsRef.current.find(r => r.id === id)
+    if (!row) return
+    setRowsSynced(rowsRef.current.filter(r => r.id !== id))
+    if (editId === id) setEditId(null)
     if (row?.id) dbDeleteRow(row.id).then(refreshStorage)
   }
 
@@ -209,7 +221,7 @@ function App() {
     if (!window.confirm('Xóa toàn bộ dữ liệu đã lưu? Hành động này không thể hoàn tác.')) return
     await clearRows()
     setRowsSynced([])
-    setEditIdx(null)
+    setEditId(null)
     setPage(1)
     setDirty(false)
     refreshStorage()
@@ -243,7 +255,7 @@ function App() {
   }
 
   const handleExport = () => {
-    setEditIdx(null)
+    setEditId(null)
     const currentRows = rowsRef.current
     if (currentRows.length === 0) return
 
@@ -260,7 +272,24 @@ function App() {
       'Note': r.note,
     }))
 
-    const ws = XLSX.utils.json_to_sheet(data)
+    // Thêm dòng tổng cộng vào cuối file Excel
+    const exportRows = [
+      ...data,
+      {
+        'STT': 'Tổng',
+        'Ngày tạo': '',
+        'Tên khách': `${currentRows.length} khách`,
+        'Giá phòng': tongGiaPhong.toLocaleString('vi-VN'),
+        'Ngày giờ check in': '',
+        'Trạng thái TT': '',
+        'Phòng': '',
+        'Người sale': '',
+        'Đã thanh toán': '',
+        'Note': '',
+      },
+    ]
+
+    const ws = XLSX.utils.json_to_sheet(exportRows)
     ws['!cols'] = [
       { wch: 5 },
       { wch: 18 },
@@ -279,8 +308,6 @@ function App() {
     XLSX.writeFile(wb, 'danh_sach_khach.xlsx')
   }
 
-  const trangThaiOptions = ['Chưa thanh toán', 'Đã TT đủ', 'Đã TT 1 phần']
-
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize))
   const currentPage = Math.min(page, totalPages)
   const startIdx = (currentPage - 1) * pageSize
@@ -294,6 +321,11 @@ function App() {
   const freeBytes = Math.max(0, storage.quota - storage.usage)
 
   const goToPage = (p) => setPage(Math.min(totalPages, Math.max(1, p)))
+
+  // Tính tổng cột tiền ngoài cùng bên trái (cột Giá phòng)
+  const tongGiaPhong = useMemo(() => {
+    return rows.reduce((sum, r) => sum + parseMoney(r.giaPhong), 0)
+  }, [rows])
 
   return (
     <div className="container">
@@ -324,7 +356,10 @@ function App() {
       ) : rows.length > 0 ? (
         <div className="table-section">
           <div className="table-header">
-            <h2>Danh sách khách ({rows.length})</h2>
+            <h2>
+              Danh sách khách ({rows.length})
+              <span className="header-total"> · Tổng tiền: <b>{tongGiaPhong.toLocaleString('vi-VN')} đ</b></span>
+            </h2>
             <div className="header-actions">
               <button className="btn-save-all" onClick={handleManualSave}>
                 💾 Lưu{dirty ? ' *' : ''}
@@ -392,20 +427,26 @@ function App() {
                   <tr key={r.id || i}>
                     <td>{i + 1}</td>
                     <td className="created-cell">{fmtDate(r.createdAt)}</td>
-                    {editIdx === i ? (
+                    {editId === r.id ? (
                       <>
-                        <td><input value={r.tenKhach} onChange={e => handleEdit(i, 'tenKhach', e.target.value)} /></td>
-                        <td><input value={r.giaPhong} onChange={e => handleEdit(i, 'giaPhong', e.target.value)} /></td>
-                        <td><input value={r.ngayGioCheckIn} onChange={e => handleEdit(i, 'ngayGioCheckIn', e.target.value)} /></td>
+                        <td><input value={r.tenKhach} onChange={e => handleEdit(r.id, 'tenKhach', e.target.value)} /></td>
+                        <td><input value={r.giaPhong} onChange={e => handleEdit(r.id, 'giaPhong', e.target.value)} /></td>
+                        <td><input value={r.ngayGioCheckIn} onChange={e => handleEdit(r.id, 'ngayGioCheckIn', e.target.value)} /></td>
                         <td>
-                          <span className={`status ${r.trangThai === 'Đã TT đủ' ? 'paid' : r.trangThai === 'Đã TT 1 phần' ? 'partial' : 'unpaid'}`}>
-                            {r.trangThai}
-                          </span>
+                          <select
+                            value={r.trangThai}
+                            onChange={e => handleEdit(r.id, 'trangThai', e.target.value)}
+                            style={{ padding: '4px', borderRadius: '4px', fontSize: '12px' }}
+                          >
+                            <option value="Đã TT đủ">Đã TT đủ</option>
+                            <option value="Đã TT 1 phần">Đã TT 1 phần</option>
+                            <option value="Chưa thanh toán">Chưa thanh toán</option>
+                          </select>
                         </td>
-                        <td><input value={r.phong} onChange={e => handleEdit(i, 'phong', e.target.value)} /></td>
-                        <td><input value={r.nguoiSale} onChange={e => handleEdit(i, 'nguoiSale', e.target.value)} /></td>
-                        <td><input value={r.daThanhToan} onChange={e => handleEdit(i, 'daThanhToan', e.target.value)} /></td>
-                        <td><input value={r.note} onChange={e => handleEdit(i, 'note', e.target.value)} /></td>
+                        <td><input value={r.phong} onChange={e => handleEdit(r.id, 'phong', e.target.value)} /></td>
+                        <td><input value={r.nguoiSale} onChange={e => handleEdit(r.id, 'nguoiSale', e.target.value)} /></td>
+                        <td><input value={r.daThanhToan} onChange={e => handleEdit(r.id, 'daThanhToan', e.target.value)} /></td>
+                        <td><input value={r.note} onChange={e => handleEdit(r.id, 'note', e.target.value)} /></td>
                         <td>
                           <button className="btn-save" onClick={() => handleRowSaveDone(r)}>Lưu</button>
                         </td>
@@ -425,14 +466,25 @@ function App() {
                         <td>{r.daThanhToan}</td>
                         <td>{r.note}</td>
                         <td className="actions">
-                          <button className="btn-edit" onClick={() => setEditIdx(i)}>Sửa</button>
-                          <button className="btn-delete" onClick={() => handleDelete(i)}>Xóa</button>
+                          <button className="btn-edit" onClick={() => setEditId(r.id)}>Sửa</button>
+                          <button className="btn-delete" onClick={() => handleDelete(r.id)}>Xóa</button>
                         </td>
                       </>
                     )}
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="summary-row">
+                  <td colSpan={3} style={{ textAlign: 'right', fontWeight: 600 }}>
+                    Tổng cộng:
+                  </td>
+                  <td className="total-cell">
+                    {tongGiaPhong.toLocaleString('vi-VN')} đ
+                  </td>
+                  <td colSpan={7}></td>
+                </tr>
+              </tfoot>
             </table>
           </div>
 
