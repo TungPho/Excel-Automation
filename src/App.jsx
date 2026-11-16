@@ -9,11 +9,11 @@ import {
   clearRows,
   deleteRowsBefore,
   estimateStorage,
+  requestPersist,
 } from './db'
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
 const WARN_PERCENT = 80 // Nhắc xuất Excel khi dung lượng đạt mức này
-const LEGACY_KEY = 'booking-app-rows' // Khóa localStorage cũ để migrate
 
 function parseMoney(val) {
   if (typeof val === 'number') return isNaN(val) ? 0 : val
@@ -101,6 +101,7 @@ function App() {
   const [dirty, setDirty] = useState(false)
   const [lastSaved, setLastSaved] = useState(null)
   const [deleteBeforeDate, setDeleteBeforeDate] = useState('')
+  const [persisted, setPersisted] = useState(null) // null = chưa kiểm tra, true/false
   const rowsRef = useRef(rows)
 
   const setRowsSynced = (newRows) => {
@@ -112,34 +113,29 @@ function App() {
     setStorage(await estimateStorage())
   }, [])
 
-  const onQuota = (e) => {
+  const onSaveError = (e) => {
+    console.error('[App] Save error:', e)
     if (e && e.name === 'QuotaExceededError') {
-      setError('Hết dung lượng lưu trữ trình duyệt. Hãy xuất Excel rồi xóa bớt dữ liệu cũ.')
+      setError('⚠️ Hết dung lượng lưu trữ. Hãy xuất Excel rồi xóa bớt dữ liệu cũ.')
+    } else {
+      setError('⚠️ Lỗi lưu dữ liệu: ' + (e?.message || e) + '. Dữ liệu có thể chưa được lưu!')
     }
   }
 
-  // Tải dữ liệu lần đầu: migrate từ localStorage cũ (nếu có) rồi đọc từ IndexedDB.
+  // Tải dữ liệu lần đầu: đọc + merge từ IndexedDB & localStorage.
+  // Yêu cầu persistent storage để trình duyệt không tự xóa dữ liệu.
   useEffect(() => {
     (async () => {
       try {
-        let data = await getAllRows()
-        if (data.length === 0) {
-          const raw = localStorage.getItem(LEGACY_KEY)
-          if (raw) {
-            try {
-              const legacy = JSON.parse(raw)
-              if (Array.isArray(legacy) && legacy.length) {
-                const now = new Date().toISOString()
-                data = legacy.map(r => ({
-                  ...r,
-                  id: r.id || newId(),
-                  createdAt: r.createdAt || now,
-                }))
-                await putRows(data)
-              }
-            } catch { /* bỏ qua dữ liệu cũ hỏng */ }
-          }
+        // Yêu cầu persistent storage
+        const granted = await requestPersist()
+        setPersisted(granted)
+        if (!granted) {
+          console.warn('[App] Persistent storage NOT granted — dữ liệu có thể bị trình duyệt xóa')
         }
+
+        // Đọc dữ liệu (getAllRows tự merge IDB + LS)
+        const data = await getAllRows()
         data.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
         setRowsSynced(data)
       } catch (e) {
@@ -193,7 +189,7 @@ function App() {
     setRowsSynced(newRows)
     setText('')
     setPage(Math.ceil(newRows.length / pageSize))
-    putRow(row).then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() }).catch(onQuota)
+    putRow(row).then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() }).catch(onSaveError)
   }
 
   const handleEdit = (id, field, value) => {
@@ -206,7 +202,7 @@ function App() {
     setEditId(null)
     putRow(row)
       .then(() => { setDirty(false); setLastSaved(new Date()); refreshStorage() })
-      .catch(onQuota)
+      .catch(onSaveError)
   }
 
   const handleDelete = (id) => {
@@ -250,7 +246,7 @@ function App() {
       setLastSaved(new Date())
       refreshStorage()
     } catch (e) {
-      onQuota(e)
+      onSaveError(e)
     }
   }
 
@@ -322,7 +318,7 @@ function App() {
 
   const goToPage = (p) => setPage(Math.min(totalPages, Math.max(1, p)))
 
-  // Tính tổng cột tiền ngoài cùng bên trái (cột Giá phòng)
+  // Tính tổng cột ngoài cùng bên trái (cột Giá phòng)
   const tongGiaPhong = useMemo(() => {
     return rows.reduce((sum, r) => sum + parseMoney(r.giaPhong), 0)
   }, [rows])
@@ -401,7 +397,10 @@ function App() {
             <span className="storage-text">
               Đã dùng {fmtBytes(storage.usage)}
               {storage.quota ? ` / ${fmtBytes(storage.quota)} (${percent.toFixed(1)}%)` : ''} ·
-              còn trống ~{fmtBytes(freeBytes)} · {rows.length.toLocaleString('vi-VN')} record (IndexedDB)
+              còn trống ~{fmtBytes(freeBytes)} · {rows.length.toLocaleString('vi-VN')} record ·{' '}
+              <span className="storage-badge-safe">
+                🔒 Lưu kép (IndexedDB + localStorage){persisted ? ' · Chống xóa vĩnh viễn' : ''}
+              </span>
             </span>
           </div>
 
